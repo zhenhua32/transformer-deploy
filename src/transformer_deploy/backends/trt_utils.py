@@ -247,6 +247,7 @@ def infer_tensorrt(
     output_binding_idxs: List[int],
 ) -> Dict[str, torch.Tensor]:
     """
+    执行推理
     Perform inference with TensorRT.
     :param context: shared variable
     :param inputs: input tensor
@@ -256,27 +257,36 @@ def infer_tensorrt(
     """
 
     input_tensors: List[torch.Tensor] = list()
+    # 对于每个名字的索引位置. 现在是按名字读取的输入, 所以 dict 的顺序就不重要了
     for i in range(context.engine.num_bindings):
+        # 判断是否是输入位置
         if not context.engine.binding_is_input(index=i):
             continue
+        # 输入的名字
         tensor_name = context.engine.get_binding_name(i)
         assert tensor_name in inputs, f"input not provided: {tensor_name}"
         tensor = inputs[tensor_name]
         assert isinstance(tensor, torch.Tensor), f"unexpected tensor class: {type(tensor)}"
+        # 需要在 cuda 上. 原来如此, 旧的 v0.4.0 版本会手动给你复制到 cuda 上, 所以不会有这个报错
         assert tensor.device.type == "cuda", f"unexpected device type (trt only works on CUDA): {tensor.device.type}"
+        # 类型会被截断到 int32 上
         # warning: small changes in output if int64 is used instead of int32
         if tensor.dtype in [torch.int64, torch.long]:
             logging.warning(f"using {tensor.dtype} instead of int32 for {tensor_name}, will be casted to int32")
             tensor = tensor.type(torch.int32)
         input_tensors.append(tensor)
+    # 继续深入, 实际上还是要看这个函数
     # calculate input shape, bind it, allocate GPU memory for the output
     outputs: Dict[str, torch.Tensor] = get_output_tensors(
         context, input_tensors, input_binding_idxs, output_binding_idxs
     )
+    # data_prt 返回第一个元素的地址 Returns the address of the first element of self tensor.
     bindings = [int(i.data_ptr()) for i in input_tensors + list(outputs.values())]
+    # Asynchronously execute inference on a batch. 这个是异步执行的, 所以下面需要使用 synchronize
     assert context.execute_async_v2(
         bindings, torch.cuda.current_stream().cuda_stream
     ), "failure during execution of inference"
+    # 等待完成, 相当于强制同步
     torch.cuda.current_stream().synchronize()  # sync all CUDA ops
 
     return outputs
@@ -286,6 +296,7 @@ def load_engine(
     runtime: Runtime, engine_file_path: str, profile_index: int = 0
 ) -> Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]:
     """
+    加载序列化的 TensorRT 模型(引擎).
     Load serialized TensorRT engine.
     :param runtime: shared variable
     :param engine_file_path: path to the serialized engine
@@ -306,6 +317,7 @@ def load_engine(
         # retrieve input/output IDs
         input_binding_idxs, output_binding_idxs = get_binding_idxs(engine, profile_index)  # type: List[int], List[int]
 
+        # 主要是返回这个推理函数
         def tensorrt_model(inputs: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
             return infer_tensorrt(
                 context=context,
@@ -329,6 +341,7 @@ def save_engine(engine: ICudaEngine, engine_file_path: str) -> None:
 
 def get_binding_idxs(engine: trt.ICudaEngine, profile_index: int):
     """
+    计算输入和输出的索引位置
     Calculate start/end binding indices for current context's profile
     https://docs.nvidia.com/deeplearning/tensorrt/developer-guide/index.html#opt_profiles_bindings
     :param engine: TensorRT engine generated during the model building
