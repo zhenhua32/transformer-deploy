@@ -219,6 +219,7 @@ def get_output_tensors(
     output_binding_idxs: List[int],
 ) -> Dict[str, torch.Tensor]:
     """
+    保留内存.
     Reserve memory in GPU for input and output tensors.
     :param context: TensorRT context shared accross inference steps
     :param host_inputs: input tensor
@@ -228,13 +229,17 @@ def get_output_tensors(
     """
     # explicitly set dynamic input shapes, so dynamic output shapes can be computed internally
     for host_input, binding_index in zip(host_inputs, input_binding_idxs):
+        # Set the dynamic shape of a binding. 设置动态形状, 根据这个输入的形状
         context.set_binding_shape(binding_index, tuple(host_input.shape))
     # assert context.all_binding_shapes_specified
     device_outputs: Dict[str, torch.Tensor] = dict()
     for binding_index in output_binding_idxs:
+        # 获取输出的形状
         # TensorRT computes output shape based on input shape provided above
         output_shape = context.get_binding_shape(binding=binding_index)
+        # 输出的名字
         output_name = context.engine.get_binding_name(index=binding_index)
+        # 分配 GPU 内存空间
         # allocate buffers to hold output results
         device_outputs[output_name] = torch.empty(tuple(output_shape), device="cuda")
     return device_outputs
