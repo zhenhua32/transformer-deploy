@@ -14,6 +14,8 @@
 
 """
 All the tooling to ease TensorRT usage.
+
+应该主要看这一部分吧, 这是使用 tensorrt 的
 """
 import dataclasses
 import logging
@@ -21,6 +23,7 @@ from dataclasses import dataclass
 from time import time
 from typing import Callable, Dict, List, Optional
 
+# 主要使用的库是 tensorrt
 import tensorrt as trt
 import torch
 from tensorrt import ICudaEngine, IExecutionContext, ILayer, INetworkDefinition, Logger, Runtime
@@ -290,9 +293,15 @@ def load_engine(
     :return: A function to perform inference
     """
     with open(file=engine_file_path, mode="rb") as f:
+        # 反序列化, 返回 ICudaEngine. An ICudaEngine for executing inference on a built network.
         engine: ICudaEngine = runtime.deserialize_cuda_engine(f.read())
+        # A CUDA stream is a linear sequence of execution that belongs to a specific device, independent from other streams. See CUDA semantics for details.
+        # .cuda_stream 属性好像不在 torch 的文档上. 而且类型是 int
         stream: int = torch.cuda.current_stream().cuda_stream
+        # Create an IExecutionContext . 创建一个执行上下文
+        # Context for executing inference using an ICudaEngine . Multiple IExecutionContext s may exist for one ICudaEngine instance, allowing the same ICudaEngine to be used for the execution of multiple batches simultaneously.
         context: IExecutionContext = engine.create_execution_context()
+        # Set the optimization profile with async semantics. 加载优化配置文件
         context.set_optimization_profile_async(profile_index=profile_index, stream_handle=stream)
         # retrieve input/output IDs
         input_binding_idxs, output_binding_idxs = get_binding_idxs(engine, profile_index)  # type: List[int], List[int]
@@ -326,11 +335,15 @@ def get_binding_idxs(engine: trt.ICudaEngine, profile_index: int):
     :param profile_index: profile to use (several profiles can be set during building)
     :return: input and output tensor indexes
     """
+    # num_bindings 就是输入和输出的名字数量. num_optimization_profiles 是优化配置文件的数量
     num_bindings_per_profile = engine.num_bindings // engine.num_optimization_profiles
+    # 开始的索引位置
     start_binding = profile_index * num_bindings_per_profile
+    # 结束的索引位置
     end_binding = start_binding + num_bindings_per_profile  # Separate input and output binding indices for convenience
     input_binding_idxs: List[int] = []
     output_binding_idxs: List[int] = []
+    # 判断每个索引位置是否是输入, 将输入和输出的索引分别装到数组中
     for binding_index in range(start_binding, end_binding):
         if engine.binding_is_input(binding_index):
             input_binding_idxs.append(binding_index)
