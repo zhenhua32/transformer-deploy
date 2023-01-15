@@ -309,6 +309,7 @@ def infer_tensorrt(
         input_tensors.append(tensor)
     # 继续深入, 实际上还是要看这个函数
     # calculate input shape, bind it, allocate GPU memory for the output
+    # 这里返回的是 dict, 和 v0.4.0 不同, 后者返回了 list
     outputs: Dict[str, torch.Tensor] = get_output_tensors(
         context, input_tensors, input_binding_idxs, output_binding_idxs
     )
