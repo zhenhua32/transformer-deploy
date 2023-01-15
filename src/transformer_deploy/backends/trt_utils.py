@@ -52,9 +52,13 @@ class TensorRTShape:
         """
         Basic checks of provided shapes
         """
+        # 形状相同
         assert len(self.min_shape) == len(self.optimal_shape) == len(self.max_shape)
+        # 长度大于 0
         assert len(self.min_shape) > 0
+        # 第一个维度大于 0
         assert self.min_shape[0] > 0 and self.optimal_shape[0] > 0 and self.max_shape[0] > 0
+        # 名字不是空的
         assert self.input_name is not None
 
     def make_copy(self, input_name: str) -> "TensorRTShape":
@@ -99,6 +103,7 @@ def fix_fp16_network(network_definition: INetworkDefinition) -> INetworkDefiniti
             # casting to get access to op attribute
             layer.__class__ = IElementWiseLayer
             next_layer.__class__ = IReduceLayer
+            # 不懂这是在做什么, 主要是这几行吗? 将 precision 设置为 FLOAT
             if layer.op == trt.ElementWiseOperation.POW:
                 layer.precision = trt.DataType.FLOAT
                 next_layer.precision = trt.DataType.FLOAT
@@ -118,6 +123,7 @@ def build_engine(
     **kwargs,
 ) -> ICudaEngine:
     """
+    看下这个, 看看能不能在线转换成 trt 模型
     Convert ONNX file to TensorRT engine.
     It supports dynamic shape, however it's advised to keep sequence length fix as it hurts performance otherwise.
     Dynamic batch size doesn't hurt performance and is highly advised.
@@ -139,6 +145,7 @@ def build_engine(
     :param fp16_fix: a function to set FP32 precision on some nodes to fix FP16 overflow
     :return: TensorRT engine to use during inference
     """
+    # 判断输入参数, 组合成 input_shapes
     # default input shape
     if "min_shape" in kwargs and "optimal_shape" in kwargs and "max_shape" in kwargs:
         default_shape = TensorRTShape(
@@ -152,15 +159,26 @@ def build_engine(
         assert "input_shapes" in kwargs, "missing input shapes"
         input_shapes: List[TensorRTShape] = kwargs["input_shapes"]
 
+    # Builds an ICudaEngine from a INetworkDefinition .
     builder: Builder = trt.Builder(logger)
     network_def: INetworkDefinition = builder.create_network(
+        # 目前 NetworkDefinitionCreationFlag 的参数中就这一个, 另一个 EXPLICIT_PRECISION 已经被弃用且没效果了.
         flags=1 << int(trt.NetworkDefinitionCreationFlag.EXPLICIT_BATCH)
     )
+    # 文档中就三个 parser, UFF Parser, Caffe Parser, Onnx Parser
+    # This class is used for parsing ONNX models into a TensorRT network definition
     parser: OnnxParser = trt.OnnxParser(network_def, logger)
+    # Create a builder configuration object.
     config: IBuilderConfig = builder.create_builder_config()
     if workspace_size is not None:
+        # 设置内存池大小, 有了这个限制之后, tensorrt 会试图创建一个满足限制的计划文件, 或者报告导致失败的约束
+        # 看了文档, 还是不知道 MemoryPoolType 应该怎么选
+        # DLA 是 Deep Learning Accelerator 的缩写
+        # DLA_GLOBAL_DRAM is host RAM used by DLA to store weights and metadata for execution. The size of this pool must be at least 4 KiB and must be a power of 2. This defaults to 512 MiB.
         config.set_memory_pool_limit(trt.tensorrt.MemoryPoolType.DLA_GLOBAL_DRAM, workspace_size)
+    # 直译是战术来源
     config.set_tactic_sources(
+        # 看文档上, 几个战术来源基本都是默认启用的
         tactic_sources=1 << int(trt.TacticSource.CUBLAS)
         | 1 << int(trt.TacticSource.CUBLAS_LT)
         | 1 << int(trt.TacticSource.CUDNN)  # trt advised to use cuDNN for transfo architecture
@@ -176,21 +194,27 @@ def build_engine(
     with open(onnx_file_path, "rb") as f:
         # file path needed for models with external dataformat
         # https://github.com/onnx/onnx-tensorrt/issues/818
+        # 解析模型
         parser.parse(model=f.read(), path=onnx_file_path)
+    # 创建优化配置
     profile: IOptimizationProfile = builder.create_optimization_profile()
     # duplicate default shape (one for each input)
+    # 如果第一个是默认形状, 就复制成多份, 并赋予输入的名字
     if len(input_shapes) == 1 and input_shapes[0].input_name is None:
         names = [network_def.get_input(num_input).name for num_input in range(network_def.num_inputs)]
         input_shapes = input_shapes[0].generate_multiple_shapes(input_names=names)
 
     for shape in input_shapes:
         shape.check_validity()
+        # 设置形状
         profile.set_shape(
             input=shape.input_name,
             min=shape.min_shape,
             opt=shape.optimal_shape,
             max=shape.max_shape,
         )
+    # 这个 shape_tensors 不知道是什么意思
+    # Set the minimum/optimum/maximum values for a shape input tensor.
     if "shape_tensors" in kwargs:
         for shape in kwargs["shape_tensors"]:
             profile.set_shape_input(
@@ -199,13 +223,16 @@ def build_engine(
                 opt=shape.optimal_shape,
                 max=shape.max_shape,
             )
+    # 添加优化配置
     config.add_optimization_profile(profile)
     if fp16:
         network_def = fp16_fix(network_def)
 
     logger.log(msg="building engine. depending on model size this may take a while", severity=trt.ILogger.WARNING)
     start = time()
+    # 真正开始构建网络
     trt_engine = builder.build_serialized_network(network_def, config)
+    # 反序列化网络
     engine: ICudaEngine = runtime.deserialize_cuda_engine(trt_engine)
     logger.log(msg=f"building engine took {time() - start:4.1f} seconds", severity=trt.ILogger.WARNING)
     assert engine is not None, "error during engine generation, check error messages above :-("
